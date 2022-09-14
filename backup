@@ -1,0 +1,150 @@
+#!/bin/bash
+
+# Default Variables
+CONFIG__MODE="sftp"
+
+CONFIG__SFTP_USER="xxx"
+CONFIG__SFTP_PASS="xxx"
+CONFIG__SFTP_HOST="xxx"
+
+CONFIG__B2_ACCOUNT="xxx"
+CONFIG__B2_KEY="xxx"
+CONFIG__B2_BUCKET="xxx"
+
+CONFIG__BACKUP_PREFIX=""
+
+CONFIG__GPG_ENCRYPT_KEY="xxx"
+
+CONFIG__RETENTION_INCREMENTAL="30D"
+CONFIG__RETENTION_FULL="90D"
+
+CONFIG__FILES="/var/www/vhosts"
+CONFIG__FILES_EXCLUDES=""
+
+CONFIG__DATABASE_WORKING_DIRECTORY="/opt/backup/data/database"
+CONFIG__DATABASES=$(mysql --execute="SHOW DATABASES" | awk '{print $1}' | grep -v ^Database$ | grep -v ^mysql$ | grep -v ^performance_schema$ | grep -v ^information_schema$ | tr \\\r\\\n ,\ )
+
+# Load ENV Overrides
+if [ -f /opt/backup/config.env ] ; then
+	. /opt/backup/config.env
+fi
+
+abort() {
+	echo -e "\033[41m\033[1;37m!!! ERR: $1\033[0m"
+	exit $2
+}
+
+get_dsn() {
+	if [ "$CONFIG__MODE" == "sftp" ]; then
+		sftp_dns
+	elif [ "$CONFIG__MODE" == "b2" ]; then
+		b2_dsn
+	else
+		abort "Unknown Mode" 10
+	fi
+}
+
+sftp_dns() {
+	echo "sftp://$CONFIG__SFTP_USER:$CONFIG__SFTP_PASS@$CONFIG__SFTP_HOST$CONFIG__BACKUP_PREFIX$1"
+}
+
+b2_dsn() {
+	echo "b2://$CONFIG__B2_ACCOUNT:$CONFIG__B2_KEY@$CONFIG__B2_BUCKET$CONFIG__BACKUP_PREFIX$1"
+}
+
+__backup() {
+	CONNECTION=$(get_dsn "$2")
+
+	# Cleanup
+	duplicity remove-older-than "$CONFIG__RETENTION_FULL" --force --encrypt-key="$CONFIG__GPG_ENCRYPT_KEY" "$CONNECTION"
+
+	# Backup
+	duplicity --encrypt-key="$CONFIG__GPG_ENCRYPT_KEY" --full-if-older-than "$CONFIG__RETENTION_INCREMENTAL" "$1" "$CONNECTION"
+
+	# Verify
+	duplicity verify --encrypt-key="$CONFIG__GPG_ENCRYPT_KEY" "$CONNECTION" "$1"
+
+	# Cleanup Failed Backups
+	duplicity cleanup --force --encrypt-key="$GPG_KEY" "$CONNECTION"
+}
+
+
+
+cmd_backup() {
+	# Backup Files
+	__backup "$CONFIG__FILES" "/files"
+
+
+	# Backup Databases
+	TIMESTAMP=$(date "+%b_%d_%Y_%H_%M_%S")
+	mkdir -p $CONFIG__DATABASE_WORKING_DIRECTORY/current/
+	for database in $CONFIG__DATABASES
+	do
+		mysqldump --single-transaction --triggers --routines $database > "$CONFIG__DATABASE_WORKING_DIRECTORY/current/$database.sql" \
+			&& gzip "$CONFIG__DATABASE_WORKING_DIRECTORY/current/$database.sql"
+	done
+	__backup "$CONFIG__DATABASE_WORKING_DIRECTORY/current" "/databases"
+
+	# Cleanup mysqldumps for next run
+	mkdir -p $CONFIG__DATABASE_WORKING_DIRECTORY/historic/$TIMESTAMP
+	mv $CONFIG__DATABASE_WORKING_DIRECTORY/current/* $CONFIG__DATABASE_WORKING_DIRECTORY/historic/$TIMESTAMP
+	# ls -dt $CONFIG__DATABASE_WORKING_DIRECTORY/historic/ | tail -n +4 | xargs rm -rf
+}
+
+cmd_help() {
+	echo "Usage: 
+  $(basename "$0") action [args] -- wrapper for duplicity
+
+  Valid Action Params:
+    - 'backup'			starts a new backup
+    - 'dsn'				dumps the current configured dsn to screen
+    - 'list-files'		lists files on remote
+    - 'restore'			restores files from remote
+    - 'restore-file'	restores a certain file / directory from the remote
+    - 'help'			help output
+
+  Examples:
+    $(basename "$0") backup
+    $(basename "$0") dsn
+    $(basename "$0") list-files /databases
+    $(basename "$0") restore /databases /tmp/restored_databases
+    $(basename "$0") restore-file /files /tmp/wp-config.php wp-config.php
+"    
+}
+
+cmd_list_files() {
+	duplicity list-current-files "$(get_dsn)$1"
+}
+
+cmd_restore() {
+	duplicity "$(get_dsn)$1" "$2"
+}
+
+cmd_restore_file() {
+	duplicity --file-to-restore "$3" "$(get_dsn)$1" "$2"
+}
+
+
+########
+# Main #
+########
+
+# Check Duplicity is installed
+[ ! -x "$(command -v duplicity)" ] && abort "duplicity is not installed" 20
+
+# Check B2 Connection
+duplicity collection-status $(get_dsn) > /dev/null
+[ "$?" != "0" ] && abort "DNS Connection Invalid" 30
+
+
+case "$1" in
+  backup) cmd_backup;;
+  dsn) get_dsn;;
+  list-files) cmd_list_files "$2";;
+  restore) cmd_restore "$2" "$3";;
+  restore-file) cmd_restore_file "$2" "$3" "$4";;
+  *) cmd_help;;
+esac
+
+
+
