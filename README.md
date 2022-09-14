@@ -2,6 +2,7 @@
 
 ## Installation
 ```
+apt install duplicity python3-b2sdk -y
 sudo git clone {THIS_REPO} /opt/backup
 ```
 
