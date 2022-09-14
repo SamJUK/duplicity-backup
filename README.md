@@ -32,5 +32,5 @@ sudo git clone {THIS_REPO} /opt/backup
 ## Auto Backup
 Add to crontab
 ```
-7 0 * * * /bin/bash /opt/backup >> /opt/backup/backup.log
+7 0 * * * /bin/bash /opt/backup backup >> /opt/backup/backup.log
 ```
